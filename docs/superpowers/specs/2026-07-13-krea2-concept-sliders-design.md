@@ -147,8 +147,30 @@ Manual smoke (user-run, needs weights/hardware):
 - Short Krea2 LoRA run with `SLIDER_MODE="text"` → loss moves, LoRA saves.
 - Confirm `SLIDER_MODE=None` leaves the normal training code path unchanged (guard is a no-op).
 
-## Open risks
+## Risk analysis (investigated before implementation)
 
-- **`predict` extraction friction.** The whole text slider hinges on how cleanly the transformer-forward core factors out of `BaseKrea2Setup.predict`. If `predict` is more entangled than it looks (offload conductors, autocast contexts, attention masks tied to caption length), the extraction is the bulk of the work and may need adaptation.
-- **Attention mask / seq-len assumptions.** Cached slider prompts have their own sequence lengths; the extracted forward must handle each prompt's mask correctly rather than assuming the batch caption's length.
-- **Multiplier vs. non-LoRA modules.** `set_multiplier` is defined for plain LoRA only. Using a slider with DoRA/LoKr is unsupported and out of scope.
+All three original risks were checked against the actual code. Verdict: **all LOW**; the text slider is more tractable than the signatures suggested.
+
+### R1 — `predict` extraction friction → **LOW (resolved)**
+
+`BaseKrea2Setup.predict` (`BaseKrea2Setup.py:69`) is clean. The transformer-forward core is a self-contained block at **lines 116–142**: pack latents → compute `position_ids` from `text_seq_len` + latent grid → mask handling → `model.transformer(...)` → `unpack_latents`. It depends only on `(latent_input, text_encoder_output, text_attention_mask, timestep)` — no hidden coupling to offload conductors. The only enclosing context is `with model.autocast_context` (lines 78), which the slider step wraps identically.
+
+**Plan:** extract `_transformer_forward(model, latent_input, text_encoder_output, text_attention_mask, timestep) -> predicted_flow`. `predict` calls it once; the text slider calls it 4× (3 teacher + 1 student). Low-risk mechanical refactor.
+
+### R2 — attention-mask / seq-len per prompt → **LOW (resolved)**
+
+`position_ids` and the mask are already derived **per prompt** from `text_seq_len = text_encoder_output.shape[1]` inline (lines 119–127), including the `if torch.all(mask): mask = None` shortcut. Because the extracted helper recomputes these from its own argument, each cached slider prompt (different length) is handled correctly for free. Furthermore, `model.encode_text(text="...")` accepts a **raw string** (`Krea2Model.py:172, 178`) and returns `(text_encoder_output, text_attention_mask)` ready to feed the helper — so caching the 4 slider prompts is one `encode_text` call each at train start. Text-encode path fully closed.
+
+### R3 — LoRA multiplier → **LOW (resolved), one residual note**
+
+`LoRAModule.forward` is `orig_forward(x) + delta_forward(x)`, with `delta = ld * (alpha / rank)` (`LoRAModule.py:576, 581`). Add `multiplier: float = 1.0` to `PeftBase` and factor it into the delta (`ld * (alpha / rank) * multiplier`); add `LoRAModuleWrapper.set_multiplier` mirroring `set_dropout` (`LoRAModule.py:1123`). `multiplier` is a plain float (not a registered buffer) ⇒ **not saved**, no effect on the exported LoRA. Teacher = `0` (delta contributes nothing = base model), student = `1`, image slider = `±1`.
+
+- **Residual (noted, low):** a separate path `orig_module.forward_with_lora(...)` at `LoRAModule.py:573–574` is used when the target linear is a `BaseLinearSVD` (i.e. **quantized** transformer). It bypasses `delta_forward`, so the multiplier must **also** be honored there (fold `multiplier` into the passed `alpha`, or scale the result). Irrelevant for a first non-quantized run, but must not be forgotten if training a quantized Krea2 transformer.
+
+### Consequence for the ai-toolkit "batched teacher forward" optimization
+
+The 3 teacher prompts have **different sequence lengths and different `position_ids`**, so batching them into one forward would require padding to a common length plus a combined mask. This confirms the decision to ship **3 sequential teacher forwards first** and treat batching as a later, optional optimization.
+
+### Out of scope (unchanged)
+
+`set_multiplier` is defined for plain LoRA. Using a slider with DoRA/LoKr is unsupported by design.
