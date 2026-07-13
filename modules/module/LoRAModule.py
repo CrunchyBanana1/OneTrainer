@@ -29,6 +29,7 @@ class PeftBase(nn.Module):
     prefix: str
     layer_kwargs: dict  # Applied during the forward op() call.
     _initialized: bool  # Tracks whether we've created the layers or not.
+    multiplier: float   # slider multiplier applied to the LoRA delta (1.0 = normal)
 
     def __init__(self, prefix: str, orig_module: nn.Module | None):
         super().__init__()
@@ -37,6 +38,7 @@ class PeftBase(nn.Module):
         self.is_applied = False
         self.layer_kwargs = {}
         self._initialized = False
+        self.multiplier = 1.0  # slider control; plain float, never saved. Scales delta_forward output.
 
         if orig_module is not None:
             match orig_module:
@@ -578,7 +580,7 @@ class LoRAModule(PeftBase):
     def delta_forward(self, x, *args, **kwargs) -> Tensor | None:
         self.check_initialized()
         ld = self.lora_up(self.dropout(self.lora_down(x)))
-        return ld * (self.alpha / self.rank)
+        return ld * (self.alpha / self.rank) * self.multiplier
 
     def apply_to_module(self):
         # TODO
@@ -1128,3 +1130,11 @@ class LoRAModuleWrapper:
             raise ValueError("Dropout probability must be in [0, 1]")
         for module in self.lora_modules.values():
             module.dropout.p = dropout_probability
+
+    def set_multiplier(self, multiplier: float):
+        """
+        Sets the slider multiplier on every LoRA module (1.0 = normal, 0.0 = disabled,
+        -1.0 = negated). Only honored by plain LoRAModule.delta_forward.
+        """
+        for module in self.lora_modules.values():
+            module.multiplier = multiplier
