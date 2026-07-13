@@ -91,76 +91,109 @@ class BaseKrea2Setup(
                 text_encoder_dropout_probability=config.text_encoder.dropout_probability if not deterministic else None,
             )
 
-            latent_image = batch['latent_image']
-            scaled_latent_image = model.scale_latents(latent_image)
-            latent_noise = self._create_noise(scaled_latent_image, config, generator)
+            prep = self._prepare_noised_latent(model, batch, config, generator, deterministic)
 
-            shift = model.calculate_timestep_shift(scaled_latent_image.shape[-2], scaled_latent_image.shape[-1])
-            timestep = self._get_timestep_discrete(
-                model.noise_scheduler.config['num_train_timesteps'],
-                deterministic,
-                generator,
-                scaled_latent_image.shape[0],
-                config,
-                shift = shift if config.dynamic_timestep_shifting else config.timestep_shift,
+            predicted_flow = self._transformer_forward(
+                model,
+                prep['scaled_noisy_latent_image'],
+                text_encoder_output,
+                text_attention_mask,
+                prep['timestep'],
             )
 
-            scaled_noisy_latent_image, sigma = self._add_noise_discrete(
-                scaled_latent_image,
-                latent_noise,
-                timestep,
-                model.noise_scheduler.timesteps,
-            )
-
-            latent_input = scaled_noisy_latent_image
-            packed_latent_input = model.pack_latents(latent_input)
-
-            # position ids: text tokens at origin, image tokens at latent-grid coords (patch_size = 2)
-            text_seq_len = text_encoder_output.shape[1]
-            grid_height = latent_input.shape[-2] // 2
-            grid_width = latent_input.shape[-1] // 2
-            position_ids = Krea2Pipeline.prepare_position_ids(
-                text_seq_len, grid_height, grid_width, self.train_device
-            )
-
-            if torch.all(text_attention_mask):
-                text_attention_mask = None
-
-            packed_predicted_flow = model.transformer(
-                hidden_states=packed_latent_input.to(dtype=model.train_dtype.torch_dtype()),
-                encoder_hidden_states=text_encoder_output.to(dtype=model.train_dtype.torch_dtype()),
-                timestep=timestep / 1000,
-                position_ids=position_ids,
-                encoder_attention_mask=text_attention_mask,
-                return_dict=False,
-            )[0]
-
-            predicted_flow = model.unpack_latents(
-                packed_predicted_flow,
-                height=latent_input.shape[-2],
-                width=latent_input.shape[-1],
-            )
-
-            flow = latent_noise - scaled_latent_image
+            flow = prep['latent_noise'] - prep['scaled_latent_image']
             model_output_data = {
                 'loss_type': 'target',
-                'timestep': timestep,
+                'timestep': prep['timestep'],
                 'predicted': predicted_flow,
                 'target': flow,
             }
 
             if config.debug_mode:
                 with torch.no_grad():
-                    predicted_scaled_latent_image = scaled_noisy_latent_image - predicted_flow * sigma
+                    predicted_scaled_latent_image = prep['scaled_noisy_latent_image'] - predicted_flow * prep['sigma']
                     self._save_tokens("7-prompt", batch['tokens'], model.tokenizer, config, train_progress)
-                    self._save_latent("1-noise", latent_noise, config, train_progress)
-                    self._save_latent("2-noisy_image", scaled_noisy_latent_image, config, train_progress)
+                    self._save_latent("1-noise", prep['latent_noise'], config, train_progress)
+                    self._save_latent("2-noisy_image", prep['scaled_noisy_latent_image'], config, train_progress)
                     self._save_latent("3-predicted_flow", predicted_flow, config, train_progress)
                     self._save_latent("4-flow", flow, config, train_progress)
                     self._save_latent("5-predicted_image", predicted_scaled_latent_image, config, train_progress)
-                    self._save_latent("6-image", scaled_latent_image, config, train_progress)
+                    self._save_latent("6-image", prep['scaled_latent_image'], config, train_progress)
 
         return model_output_data
+
+    def _transformer_forward(
+            self,
+            model: Krea2Model,
+            latent_input: Tensor,
+            text_encoder_output: Tensor,
+            text_attention_mask: Tensor | None,
+            timestep: Tensor,
+    ) -> Tensor:
+        packed_latent_input = model.pack_latents(latent_input)
+
+        # position ids: text tokens at origin, image tokens at latent-grid coords (patch_size = 2)
+        text_seq_len = text_encoder_output.shape[1]
+        grid_height = latent_input.shape[-2] // 2
+        grid_width = latent_input.shape[-1] // 2
+        position_ids = Krea2Pipeline.prepare_position_ids(
+            text_seq_len, grid_height, grid_width, self.train_device
+        )
+
+        if text_attention_mask is not None and torch.all(text_attention_mask):
+            text_attention_mask = None
+
+        packed_predicted_flow = model.transformer(
+            hidden_states=packed_latent_input.to(dtype=model.train_dtype.torch_dtype()),
+            encoder_hidden_states=text_encoder_output.to(dtype=model.train_dtype.torch_dtype()),
+            timestep=timestep / 1000,
+            position_ids=position_ids,
+            encoder_attention_mask=text_attention_mask,
+            return_dict=False,
+        )[0]
+
+        return model.unpack_latents(
+            packed_predicted_flow,
+            height=latent_input.shape[-2],
+            width=latent_input.shape[-1],
+        )
+
+    def _prepare_noised_latent(
+            self,
+            model: Krea2Model,
+            batch: dict,
+            config: TrainConfig,
+            generator: torch.Generator,
+            deterministic: bool,
+    ) -> dict:
+        latent_image = batch['latent_image']
+        scaled_latent_image = model.scale_latents(latent_image)
+        latent_noise = self._create_noise(scaled_latent_image, config, generator)
+
+        shift = model.calculate_timestep_shift(scaled_latent_image.shape[-2], scaled_latent_image.shape[-1])
+        timestep = self._get_timestep_discrete(
+            model.noise_scheduler.config['num_train_timesteps'],
+            deterministic,
+            generator,
+            scaled_latent_image.shape[0],
+            config,
+            shift=shift if config.dynamic_timestep_shifting else config.timestep_shift,
+        )
+
+        scaled_noisy_latent_image, sigma = self._add_noise_discrete(
+            scaled_latent_image,
+            latent_noise,
+            timestep,
+            model.noise_scheduler.timesteps,
+        )
+
+        return {
+            'scaled_latent_image': scaled_latent_image,
+            'latent_noise': latent_noise,
+            'timestep': timestep,
+            'scaled_noisy_latent_image': scaled_noisy_latent_image,
+            'sigma': sigma,
+        }
 
     def calculate_loss(
             self,
