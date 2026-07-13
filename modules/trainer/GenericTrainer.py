@@ -624,6 +624,9 @@ class GenericTrainer(BaseTrainer):
             return
 
         validate_slider_config()
+        if slider.slider_enabled():
+            slider.reset_prompt_cache()
+            slider.check_slider_compatible(self.model)
 
         scaler = create_grad_scaler() if enable_grad_scaling(self.config.train_dtype, self.parameters) else None
 

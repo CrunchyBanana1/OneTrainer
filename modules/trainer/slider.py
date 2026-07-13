@@ -5,6 +5,7 @@ Enabled via slider_config.SLIDER_MODE; dispatched from GenericTrainer. Krea2 LoR
 """
 from dataclasses import dataclass
 
+from modules.module.quantized.LinearSVD import BaseLinearSVD
 from modules.trainer import slider_config
 
 import torch
@@ -33,6 +34,44 @@ def compose_text_target(neutral: Tensor, positive: Tensor, negative: Tensor, gui
 _PROMPT_CACHE = None
 
 
+def reset_prompt_cache() -> None:
+    """Clear the memoized slider prompt encodings.
+
+    OneTrainer's UI reuses one process across successive train() calls, so the module-global
+    cache would otherwise leak a previous run's cached embeds (from a different model) into a
+    new run. Call this at the start of every training run that has the slider enabled.
+    """
+    global _PROMPT_CACHE
+    _PROMPT_CACHE = None
+
+
+def check_slider_compatible(model) -> None:
+    """Raise fast if `model` cannot correctly support slider training.
+
+    Slider training relies on `model.transformer_lora`'s multiplier to scale the LoRA delta for
+    the positive/negative/teacher/student passes. That multiplier is only honored on the plain
+    `LoRAModule.delta_forward` path. If the transformer's linears are quantized, LoRA wraps
+    `BaseLinearSVD` and `LoRAModule.forward` takes the `forward_with_lora(...)` path instead,
+    which ignores `self.multiplier` entirely -- silently breaking both the image and text
+    sliders (every sample would be trained as if multiplier=1, regardless of folder/token sign).
+    """
+    transformer_lora = getattr(model, "transformer_lora", None)
+    if transformer_lora is None:
+        raise RuntimeError(
+            "Slider training requires a Krea2 LoRA model (model.transformer_lora is None)."
+        )
+    for module in transformer_lora.lora_modules.values():
+        orig_module = getattr(module, "orig_module", None)
+        if orig_module is None:
+            continue
+        if isinstance(orig_module, BaseLinearSVD):
+            raise RuntimeError(
+                "Slider training does not support a quantized transformer: the LoRA multiplier "
+                "is ignored on the quantized (BaseLinearSVD) forward path, which would silently "
+                "produce a wrong slider. Train with a non-quantized transformer."
+            )
+
+
 @dataclass
 class SliderPromptCache:
     positive: tuple           # (text_encoder_output, mask)
@@ -57,12 +96,23 @@ def get_prompt_cache(model, train_device) -> SliderPromptCache:
 
 
 def image_slider_step(model_setup, model, batch, config, train_progress):
+    if len(batch['image_path']) != 1:
+        raise ValueError(
+            f"image_slider_step got a batch of {len(batch['image_path'])} images, but the image "
+            f"slider applies a single +1/-1 sign to the whole batch based on batch['image_path'][0]. "
+            f"Set batch_size=1 for the image slider."
+        )
     multiplier = image_multiplier_for_path(
         batch['image_path'][0], slider_config.IMAGE_POSITIVE_TOKEN, slider_config.IMAGE_NEGATIVE_TOKEN
     )
     model.transformer_lora.set_multiplier(multiplier)
-    data = model_setup.predict(model, batch, config, train_progress)
-    return model_setup.calculate_loss(model, batch, data, config)
+    try:
+        data = model_setup.predict(model, batch, config, train_progress)
+        return model_setup.calculate_loss(model, batch, data, config)
+    finally:
+        # Restore the neutral multiplier so a following sample/preview doesn't inherit the +1/-1
+        # slider sign left over from this training step.
+        model.transformer_lora.set_multiplier(1.0)
 
 
 def text_slider_step(model_setup, model, batch, config, train_progress):

@@ -86,7 +86,8 @@ class ImageSliderStepTest(unittest.TestCase):
              mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
             loss = slider.image_slider_step(setup, model, batch={'image_path': ['/d/positive/a.png']},
                                             config=_Cfg(), train_progress=_TP())
-        self.assertEqual(model.transformer_lora.multipliers, [1.0])
+        # multiplier is set to +1 for the step, then restored to the neutral 1.0 in `finally`.
+        self.assertEqual(model.transformer_lora.multipliers, [1.0, 1.0])
         self.assertEqual(setup.predict_calls, 1)
         self.assertAlmostEqual(loss.item(), 0.7, places=5)
 
@@ -97,7 +98,32 @@ class ImageSliderStepTest(unittest.TestCase):
              mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
             slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
                                      config=_Cfg(), train_progress=_TP())
-        self.assertEqual(model.transformer_lora.multipliers, [-1.0])
+        # multiplier is set to -1 for the step, then restored to the neutral 1.0 in `finally`.
+        self.assertEqual(model.transformer_lora.multipliers, [-1.0, 1.0])
+
+    def test_multiplier_restored_to_one_after_step(self):
+        setup = _StubSetup({})
+        model = _StubModel()
+        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
+             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
+            slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
+                                     config=_Cfg(), train_progress=_TP())
+        self.assertEqual(model.transformer_lora.multipliers[-1], 1.0)
+
+    def test_raises_on_batch_size_greater_than_one(self):
+        setup = _StubSetup({})
+        model = _StubModel()
+        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
+             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"), \
+             self.assertRaises(ValueError):
+            slider.image_slider_step(
+                setup, model,
+                batch={'image_path': ['/d/positive/a.png', '/d/negative/b.png']},
+                config=_Cfg(), train_progress=_TP(),
+            )
+        # must fail before touching the multiplier or running predict/calculate_loss.
+        self.assertEqual(model.transformer_lora.multipliers, [])
+        self.assertEqual(setup.predict_calls, 0)
 
 
 class DispatchTest(unittest.TestCase):
