@@ -15,7 +15,9 @@ from modules.modelLoader.BaseModelLoader import BaseModelLoader
 from modules.modelSampler.BaseModelSampler import BaseModelSampler, ModelSamplerOutput
 from modules.modelSaver.BaseModelSaver import BaseModelSaver
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
+from modules.trainer import slider
 from modules.trainer.BaseTrainer import BaseTrainer
+from modules.trainer.slider_config import validate_slider_config
 from modules.util import create, path_util
 from modules.util.bf16_stochastic_rounding import set_seed as bf16_stochastic_rounding_set_seed
 from modules.util.callbacks.TrainCallbacks import TrainCallbacks
@@ -621,6 +623,8 @@ class GenericTrainer(BaseTrainer):
                     self.data_loader.get_data_set().start_next_epoch()
             return
 
+        validate_slider_config()
+
         scaler = create_grad_scaler() if enable_grad_scaling(self.config.train_dtype, self.parameters) else None
 
         self.__apply_fused_back_pass(scaler)
@@ -733,24 +737,27 @@ class GenericTrainer(BaseTrainer):
                     step_seed = train_progress.global_step
                     bf16_stochastic_rounding_set_seed(step_seed, train_device)
 
-                    prior_pred_indices = [i for i in range(self.config.batch_size)
-                                          if ConceptType(batch['concept_type'][i]) == ConceptType.PRIOR_PREDICTION]
-                    if len(prior_pred_indices) > 0 \
-                            or (self.config.masked_training
-                                and self.config.masked_prior_preservation_weight > 0
-                                and self.config.training_method == TrainingMethod.LORA):
-                        with self.model_setup.prior_model(self.model, self.config), torch.no_grad():
-                            #do NOT create a subbatch using the indices, even though it would be more efficient:
-                            #different timesteps are used for a smaller subbatch by predict(), but the conditioning must match exactly:
-                            prior_model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
-                        model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
-                        prior_model_prediction = prior_model_output_data['predicted'].to(dtype=model_output_data['target'].dtype)
-                        model_output_data['target'][prior_pred_indices] = prior_model_prediction[prior_pred_indices]
-                        model_output_data['prior_target'] = prior_model_prediction
+                    if slider.slider_enabled():
+                        loss = slider.slider_train_step(self.model_setup, self.model, batch, self.config, train_progress)
                     else:
-                        model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+                        prior_pred_indices = [i for i in range(self.config.batch_size)
+                                              if ConceptType(batch['concept_type'][i]) == ConceptType.PRIOR_PREDICTION]
+                        if len(prior_pred_indices) > 0 \
+                                or (self.config.masked_training
+                                    and self.config.masked_prior_preservation_weight > 0
+                                    and self.config.training_method == TrainingMethod.LORA):
+                            with self.model_setup.prior_model(self.model, self.config), torch.no_grad():
+                                #do NOT create a subbatch using the indices, even though it would be more efficient:
+                                #different timesteps are used for a smaller subbatch by predict(), but the conditioning must match exactly:
+                                prior_model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+                            model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
+                            prior_model_prediction = prior_model_output_data['predicted'].to(dtype=model_output_data['target'].dtype)
+                            model_output_data['target'][prior_pred_indices] = prior_model_prediction[prior_pred_indices]
+                            model_output_data['prior_target'] = prior_model_prediction
+                        else:
+                            model_output_data = self.model_setup.predict(self.model, batch, self.config, train_progress)
 
-                    loss = self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
+                        loss = self.model_setup.calculate_loss(self.model, batch, model_output_data, self.config)
 
                     loss = loss / self.config.gradient_accumulation_steps
                     if scaler:

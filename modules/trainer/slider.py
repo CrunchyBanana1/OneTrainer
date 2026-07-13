@@ -90,6 +90,10 @@ def text_slider_step(model_setup, model, batch, config, train_progress):
     return loss
 
 
+def slider_enabled() -> bool:
+    return slider_config.SLIDER_MODE is not None
+
+
 def slider_train_step(model_setup, model, batch, config, train_progress):
     if slider_config.SLIDER_MODE == "image":
         return image_slider_step(model_setup, model, batch, config, train_progress)
