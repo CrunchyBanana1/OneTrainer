@@ -10,10 +10,16 @@ time-embedding) and exclude text-conditioning layers, via your LoRA layer
 selection in the training config.
 
 ## Image slider
-- Set `SLIDER_MODE = "image"`. Run at **batch_size = 1**.
-- Dataset: one concept with parallel subfolders whose paths contain
-  `IMAGE_POSITIVE_TOKEN` / `IMAGE_NEGATIVE_TOKEN` (default `positive`/`negative`),
-  holding same-named image pairs. Captions can match or be empty.
+- Set `SLIDER_MODE = "image"`. Run at **batch_size = 1** (the slider applies one
+  +1/-1 sign per batch; it raises if batch size > 1).
+- Dataset: one concept whose `path` is the **parent** folder, containing parallel
+  subfolders whose paths contain `IMAGE_POSITIVE_TOKEN` / `IMAGE_NEGATIVE_TOKEN`
+  (default `positive`/`negative`), holding same-named image pairs. Captions can
+  match or be empty.
+- **REQUIRED: enable the concept's "Include Subdirectories" switch.** It defaults
+  to OFF, and the images live in subfolders — with it off OneTrainer scans only
+  the (empty) parent folder, finds no images, and never trains. The concept
+  preview image count is a quick check: 0 means the switch is still off.
 - v1 uses per-sample sign (no same-step twin pairing). Use gradient
   accumulation across pairs to reduce variance.
 
