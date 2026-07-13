@@ -31,6 +31,7 @@ class _StubSetup:
         self.train_device = torch.device("cpu")
         self._forward_map = forward_map
         self.predict_calls = 0
+        self.seed_overrides = []
     def _prepare_noised_latent(self, model, batch, config, generator, deterministic):
         return {'scaled_noisy_latent_image': torch.zeros(1, 4, 8, 8),
                 'timestep': torch.tensor([500.0]),
@@ -41,8 +42,9 @@ class _StubSetup:
         # identify prompt by the sentinel value we stored in text_out[0,0,0]
         key = int(text_out[0, 0, 0].item())
         return self._forward_map[key]
-    def predict(self, model, batch, config, train_progress):
+    def predict(self, model, batch, config, train_progress, *, seed_override=None):
         self.predict_calls += 1
+        self.seed_overrides.append(seed_override)
         return {'predicted': torch.ones(1, 4, 8, 8), 'target': torch.zeros(1, 4, 8, 8)}
     def calculate_loss(self, model, batch, data, config):
         return torch.tensor(0.7)
@@ -109,6 +111,24 @@ class ImageSliderStepTest(unittest.TestCase):
             slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
                                      config=_Cfg(), train_progress=_TP())
         self.assertEqual(model.transformer_lora.multipliers[-1], 1.0)
+
+    def test_twins_share_pair_aligned_seed(self):
+        # A positive on an even global_step and its negative twin on the next (odd) step must
+        # receive the SAME seed_override (global_step // 2), so they get identical noise + timestep.
+        setup = _StubSetup({})
+        model = _StubModel()
+
+        class _TPStep:
+            def __init__(self, step):
+                self.global_step = step
+
+        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
+             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
+            slider.image_slider_step(setup, model, batch={'image_path': ['/d/positive/a.png']},
+                                     config=_Cfg(), train_progress=_TPStep(4))   # even step -> 4//2 = 2
+            slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
+                                     config=_Cfg(), train_progress=_TPStep(5))   # odd step  -> 5//2 = 2
+        self.assertEqual(setup.seed_overrides, [2, 2])
 
     def test_raises_on_batch_size_greater_than_one(self):
         setup = _StubSetup({})

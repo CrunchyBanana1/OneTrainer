@@ -113,7 +113,13 @@ def image_slider_step(model_setup, model, batch, config, train_progress):
     )
     model.transformer_lora.set_multiplier(multiplier)
     try:
-        data = model_setup.predict(model, batch, config, train_progress)
+        # Pair-aligned seed: build_image_slider_batches emits twins adjacently, so with batch_size=1
+        # a positive lands on an even global_step and its negative twin on the next (odd) step.
+        # global_step // 2 gives both the SAME seed -> identical noise + timestep, so only the concept
+        # and the +1/-1 sign differ. Without this the twins are noised differently and the shared
+        # content never cancels, so the LoRA drifts and the loss climbs. (Matches dxqb's Flux slider.)
+        pair_seed = train_progress.global_step // 2
+        data = model_setup.predict(model, batch, config, train_progress, seed_override=pair_seed)
         return model_setup.calculate_loss(model, batch, data, config)
     finally:
         # Restore the neutral multiplier so a following sample/preview doesn't inherit the +1/-1
