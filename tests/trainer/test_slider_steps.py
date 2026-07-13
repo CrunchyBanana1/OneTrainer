@@ -119,6 +119,50 @@ class DispatchTest(unittest.TestCase):
         img.assert_not_called()
         self.assertEqual(out.item(), 2.0)
 
+    def test_dispatch_default_raises(self):
+        with mock.patch.object(slider_config, "SLIDER_MODE", None), self.assertRaises(ValueError):
+            slider.slider_train_step("setup", "model", {}, "cfg", "tp")
+
+    def test_dispatch_bogus_raises(self):
+        with mock.patch.object(slider_config, "SLIDER_MODE", "bogus"), self.assertRaises(ValueError):
+            slider.slider_train_step("setup", "model", {}, "cfg", "tp")
+
+
+class _StubModelForCache:
+    """Counts encode_text calls and returns a distinct object per call."""
+    def __init__(self):
+        self.encode_calls = []
+
+    def encode_text(self, *, train_device, batch_size, text):
+        self.encode_calls.append((train_device, batch_size, text))
+        return (f"tensor-{text}", f"mask-{text}")
+
+
+class GetPromptCacheTest(unittest.TestCase):
+    def setUp(self):
+        slider._PROMPT_CACHE = None
+
+    def tearDown(self):
+        slider._PROMPT_CACHE = None
+
+    def test_memoized_across_repeated_calls(self):
+        with mock.patch.object(slider_config, "TEXT_POSITIVE", "SENTINEL_POSITIVE"), \
+             mock.patch.object(slider_config, "TEXT_NEUTRAL", "SENTINEL_NEUTRAL"), \
+             mock.patch.object(slider_config, "TEXT_NEGATIVE", "SENTINEL_NEGATIVE"), \
+             mock.patch.object(slider_config, "TEXT_TARGET", "SENTINEL_TARGET"):
+            model = _StubModelForCache()
+            train_device = torch.device("cpu")
+
+            first = slider.get_prompt_cache(model, train_device)
+            second = slider.get_prompt_cache(model, train_device)
+
+        self.assertEqual(len(model.encode_calls), 4)
+        self.assertIs(second, first)
+        self.assertEqual(first.positive, ("tensor-SENTINEL_POSITIVE", "mask-SENTINEL_POSITIVE"))
+        self.assertEqual(first.neutral, ("tensor-SENTINEL_NEUTRAL", "mask-SENTINEL_NEUTRAL"))
+        self.assertEqual(first.negative, ("tensor-SENTINEL_NEGATIVE", "mask-SENTINEL_NEGATIVE"))
+        self.assertEqual(first.target, ("tensor-SENTINEL_TARGET", "mask-SENTINEL_TARGET"))
+
 
 class _Cfg:
     train_device = torch.device("cpu")
