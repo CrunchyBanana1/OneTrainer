@@ -150,6 +150,59 @@ def slider_enabled() -> bool:
     return slider_config.SLIDER_MODE is not None
 
 
+def image_slider_enabled() -> bool:
+    return slider_config.SLIDER_MODE == "image"
+
+
+def build_image_slider_batches(batches, positive_token=None, negative_token=None):
+    """Materialize one epoch of batches and reorder them into positive->negative twin pairs.
+
+    The image slider is contrastive: each positive-folder image must be trained together with
+    its negative twin (the same file under the negative folder) so the shared image content
+    cancels and only the concept direction is learned. This materializes the whole epoch (fine
+    for the small datasets sliders use), matches each positive with its negative twin -- found by
+    substituting `positive_token` -> `negative_token` in the path and requiring an identical
+    latent shape -- and emits the two adjacently (positive then negative). Positives without
+    exactly one matching twin are dropped.
+
+    Returns `(paired_batches, dropped_paths)`. Runs at batch_size=1 (one image per batch); raises
+    otherwise. Set gradient accumulation = 2 so each optimizer step covers a whole pair, making
+    the content-gradient cancellation exact.
+    """
+    if positive_token is None:
+        positive_token = slider_config.IMAGE_POSITIVE_TOKEN
+    if negative_token is None:
+        negative_token = slider_config.IMAGE_NEGATIVE_TOKEN
+
+    orig_list = list(batches)
+    for batch in orig_list:
+        if len(batch['image_path']) != 1:
+            raise ValueError(
+                f"The image slider requires batch_size=1 (one image per batch), got "
+                f"{len(batch['image_path'])}."
+            )
+
+    paired = []
+    dropped = []
+    for batch in orig_list:
+        path = batch['image_path'][0]
+        if positive_token not in path:
+            # negatives are pulled in via their positive twin; skip standalone negatives here
+            continue
+        negative_path = path.replace(positive_token, negative_token)
+        twins = [
+            item for item in orig_list
+            if item['image_path'][0] == negative_path
+            and batch['latent_image'][0].shape == item['latent_image'][0].shape
+        ]
+        if len(twins) == 1:
+            paired.append(batch)
+            paired.append(twins[0])
+        else:
+            dropped.append(path)
+    return paired, dropped
+
+
 def slider_train_step(model_setup, model, batch, config, train_progress):
     if slider_config.SLIDER_MODE == "image":
         return image_slider_step(model_setup, model, batch, config, train_progress)

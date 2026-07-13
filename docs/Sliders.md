@@ -20,8 +20,18 @@ selection in the training config.
   to OFF, and the images live in subfolders — with it off OneTrainer scans only
   the (empty) parent folder, finds no images, and never trains. The concept
   preview image count is a quick check: 0 means the switch is still off.
-- v1 uses per-sample sign (no same-step twin pairing). Use gradient
-  accumulation across pairs to reduce variance.
+- **Pairing is mandatory.** Each `positive/` image must have a same-named twin in
+  `negative/` (matched by path + identical latent shape). At epoch start the batches
+  are reordered so each positive trains immediately before its negative twin;
+  positives with no matching twin are **dropped** (logged as `[image slider] ...
+  dropped N`). This contrastive pairing is what lets the LoRA learn only the concept
+  direction — without it, training diverges (loss climbs).
+- **Set gradient accumulation = 2** (or any multiple of 2). With twins adjacent, an
+  accumulation of 2 folds each positive+negative pair into a single optimizer step,
+  so the shared image content cancels exactly and only the concept direction is
+  learned. This is the recommended setting.
+- If loss still climbs, lower the learning rate (slider LoRAs typically want it
+  lower than a normal LoRA).
 
 ## Text slider (dataset mode)
 - Set `SLIDER_MODE = "text"`. Provide any Krea2 dataset for starting latents.
