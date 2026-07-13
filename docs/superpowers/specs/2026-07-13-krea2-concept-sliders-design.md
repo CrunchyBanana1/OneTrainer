@@ -14,6 +14,19 @@ Two old OneTrainer forks by `dxqb` implemented concept sliders for **Flux.1-dev*
 
 We are **porting the technique** to `krea2`. Note: `krea2` in this codebase is **not** Flux. `modules/model/Krea2Model.py` is built on a Qwen-image transformer (`Krea2Transformer2DModel`, `AutoencoderKLQwenImage`) with a `Qwen3VL` text encoder. The slider *technique* is architecture-agnostic, but every mechanical detail (text encoding, the transformer forward signature, the scheduler) is re-wired against the Krea2 setup classes rather than copied from the Flux ones.
 
+## Prior art / validation
+
+The teacher/student algorithm was cross-checked against two other implementations:
+
+- **ostris/ai-toolkit** (`jobs/process/TrainSliderProcess.py`) — the origin of concept sliders. Confirms our exact math: `offset = guidance * (positive - negative)`, `target = neutral + offset`, `loss = MSE(student, target)`, network multiplier `±1`. dxqb clearly derived from it. **No change to our core design.** One optional optimization: ai-toolkit runs the 3 teacher prompts as a **single batched forward** (`cat([latents]*3)`) rather than 3 sequential calls. We may adopt this later for speed, but it complicates per-prompt attention-mask handling on Krea2, so the first cut uses 3 sequential teacher forwards for clarity.
+- **bghira/SimpleTuner** (`documentation/SLIDER_LORA.md`) — its actual slider mechanism is *data-cycling* (positive/negative/neutral **datasets**), closer to our image slider than a text slider; we do **not** adopt it in place of teacher/student. Its one valuable idea is the **"leave text alone" layer-targeting rule** (below).
+
+### Recommended usage: "leave text alone" layer targeting
+
+Following the original Concept Sliders paper (and SimpleTuner), a slider LoRA gives cleaner results when it targets **only visual layers** — self-attention, conv/projection, and time-embedding — and **excludes text-conditioning layers** (cross-attention to text, text encoders). This keeps the slider modifying the *visual concept* without corrupting prompt handling.
+
+This needs **no new code**: it is controlled by which layers the LoRA config targets. It is a **preset recommendation** for the user's Krea2 LoRA training config, documented here so it isn't forgotten — not an implementation task. (If Krea2's default LoRA layer filter can't express this exclusion, revisit; but that is out of scope for the initial implementation.)
+
 ## Decisions (locked)
 
 | Decision | Choice |
