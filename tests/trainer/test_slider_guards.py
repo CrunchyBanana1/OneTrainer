@@ -1,6 +1,7 @@
 # tests/trainer/test_slider_guards.py
 import unittest
 
+from modules.module.LoRAModule import LoRAModule
 from modules.module.quantized.LinearSVD import BaseLinearSVD
 from modules.trainer import slider
 
@@ -26,9 +27,12 @@ class _ConcreteBaseLinearSVD(BaseLinearSVD):
 
 
 class _StubWrappedModule:
-    """Stands in for a PeftBase-like wrapped module: exposes only `orig_module`."""
+    """Stands in for a PeftBase-like wrapped module: mirrors PeftBase.__init__'s
+    `self._orig_module = [orig_module] if orig_module else None` convention, since
+    check_slider_compatible reads `_orig_module` directly (see PeftBase.orig_module,
+    which asserts non-None and thus isn't safe to probe with a plain getattr)."""
     def __init__(self, orig_module):
-        self.orig_module = orig_module
+        self._orig_module = [orig_module] if orig_module is not None else None
 
 
 class _StubTransformerLora:
@@ -71,9 +75,27 @@ class CheckSliderCompatibleTest(unittest.TestCase):
         slider.check_slider_compatible(model)  # must not raise
 
     def test_skips_modules_whose_orig_module_is_none(self):
-        # dummy/placeholder wrapped modules (orig_module=None) must not blow up the check.
+        # A real dummy LoRA module (as produced by LoRAModule.make_dummy(), the kind
+        # load_state_dict creates for leftover keys) is constructed with orig_module=None.
+        # Its `.orig_module` property is an asserting property (not a plain attribute), so
+        # accessing it raises AssertionError rather than AttributeError -- must not blow up
+        # the compatibility check.
+        Dummy = LoRAModule.make_dummy()
+        dummy_module = Dummy("some.prefix", None, 4, 4.0)
         lora_modules = {
-            "a": _StubWrappedModule(None),
+            "a": dummy_module,
+            "b": _StubWrappedModule(nn.Linear(4, 4)),
+        }
+        model = _StubModel(transformer_lora=_StubTransformerLora(lora_modules))
+        slider.check_slider_compatible(model)  # must not raise
+
+    def test_skips_modules_with_no_orig_module_attribute_at_all(self):
+        # e.g. FusedModuleGroup, which has no `_orig_module` attribute whatsoever.
+        class _NoOrigModuleAttr:
+            pass
+
+        lora_modules = {
+            "a": _NoOrigModuleAttr(),
             "b": _StubWrappedModule(nn.Linear(4, 4)),
         }
         model = _StubModel(transformer_lora=_StubTransformerLora(lora_modules))

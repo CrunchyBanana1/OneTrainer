@@ -61,10 +61,16 @@ def check_slider_compatible(model) -> None:
             "Slider training requires a Krea2 LoRA model (model.transformer_lora is None)."
         )
     for module in transformer_lora.lora_modules.values():
-        orig_module = getattr(module, "orig_module", None)
-        if orig_module is None:
+        # Read the underlying `_orig_module` attribute directly instead of the `orig_module`
+        # property: `PeftBase.orig_module` asserts `self._orig_module is not None` and raises
+        # AssertionError (not AttributeError) for dummy modules (orig_module=None at
+        # construction), so getattr(..., "orig_module", None) would not suppress it.
+        # `_orig_module` is `[orig_module]` or `None` (see PeftBase.__init__); modules without
+        # a `_orig_module` attribute at all (e.g. FusedModuleGroup) are also skipped.
+        orig_list = getattr(module, "_orig_module", None)
+        if not orig_list:
             continue
-        if isinstance(orig_module, BaseLinearSVD):
+        if isinstance(orig_list[0], BaseLinearSVD):
             raise RuntimeError(
                 "Slider training does not support a quantized transformer: the LoRA multiplier "
                 "is ignored on the quantized (BaseLinearSVD) forward path, which would silently "
