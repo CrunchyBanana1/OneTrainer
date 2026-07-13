@@ -92,14 +92,14 @@ New module `modules/trainer/slider.py` containing the two slider step functions.
 
 **Dataset layout:** a concept whose images live in two parallel subfolders — `.../positive/foo.png` and `.../negative/foo.png` — same filename in each. Captions matching (or empty, for a pure visual direction).
 
-**Pairing (the important part):** this is **not** a passive per-sample sign flip. For a positive sample, the step looks up its negative twin by string-substituting the folder token in the image path and matching on identical latent shape — mirroring the dxqb logic:
+**Pairing — v1 decision (per-sample sign).** dxqb paired positive+negative twins *within one step* by looking up the twin from a materialized `orig_list` and matching latent shape. OneTrainer's data pipeline is a **streaming mgds generator** with no cheap random-access to a twin's cached latent mid-step, so faithful same-step pairing is real extra work. **v1 uses per-sample sign:** at `batch_size=1`, the sign is chosen by which folder the image is in (`"positive"`/`"negative"` in the path); both folders live in one concept so the loader yields all of them, each correctly signed. Training `+1` on positives and `−1` on negatives still learns the direction; content-specific gradients cancel *in expectation over the epoch / gradient-accumulation window* rather than exactly per-step — higher variance, but a valid slider.
 
 ```python
-negative_path = batch['image_path'][0].replace(POSITIVE, NEGATIVE)
-# find the batch/dataset item whose image_path == negative_path and whose latent shape matches
+# v1: sign from the folder token in the path; no twin lookup
+multiplier = +1.0 if POSITIVE in image_path else -1.0   # NEGATIVE ⇒ -1.0
 ```
 
-Training the **same content** in both directions (alpha `+1` on positive, `−1` on negative) makes the content-specific gradients cancel, so the LoRA learns only the *direction* between the two folders. A loose "flip sign on whatever image appears" would be far noisier and is explicitly rejected.
+**Deferred enhancement (faithful pairing):** preload the negative folder's latents into a filename-keyed index at epoch start and train both twins together each step, matching dxqb exactly and reducing variance. Out of scope for v1.
 
 **Step logic:**
 1. Determine sign from the path token → `set_multiplier(+1)` (positive) or `set_multiplier(-1)` (negative).
