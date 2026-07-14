@@ -11,10 +11,6 @@ class SliderEnabledTest(unittest.TestCase):
         with mock.patch.object(slider_config, "SLIDER_MODE", None):
             self.assertFalse(slider_enabled())
 
-    def test_enabled_for_image(self):
-        with mock.patch.object(slider_config, "SLIDER_MODE", "image"):
-            self.assertTrue(slider_enabled())
-
     def test_enabled_for_text(self):
         with mock.patch.object(slider_config, "SLIDER_MODE", "text"):
             self.assertTrue(slider_enabled())

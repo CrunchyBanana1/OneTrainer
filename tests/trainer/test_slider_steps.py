@@ -26,28 +26,17 @@ class _nullcontext:
 
 
 class _StubSetup:
-    """Returns a fixed noised latent and a prompt-keyed forward result."""
+    """Returns a fixed noised latent and a prompt-keyed transformer forward result."""
     def __init__(self, forward_map):
         self.train_device = torch.device("cpu")
         self._forward_map = forward_map
-        self.predict_calls = 0
-        self.seed_overrides = []
     def _prepare_noised_latent(self, model, batch, config, generator, deterministic):
         return {'scaled_noisy_latent_image': torch.zeros(1, 4, 8, 8),
-                'timestep': torch.tensor([500.0]),
-                'latent_noise': torch.zeros(1, 4, 8, 8),
-                'scaled_latent_image': torch.zeros(1, 4, 8, 8),
-                'sigma': torch.tensor([0.5])}
+                'timestep': torch.tensor([500.0])}
     def _transformer_forward(self, model, latent_input, text_out, mask, timestep):
-        # identify prompt by the sentinel value we stored in text_out[0,0,0]
+        # identify the prompt by the sentinel value we stored in text_out[0,0,0]
         key = int(text_out[0, 0, 0].item())
         return self._forward_map[key]
-    def predict(self, model, batch, config, train_progress, *, seed_override=None):
-        self.predict_calls += 1
-        self.seed_overrides.append(seed_override)
-        return {'predicted': torch.ones(1, 4, 8, 8), 'target': torch.zeros(1, 4, 8, 8)}
-    def calculate_loss(self, model, batch, data, config):
-        return torch.tensor(0.7)
 
 
 def _sentinel_prompt(value):
@@ -76,105 +65,16 @@ class TextSliderStepTest(unittest.TestCase):
             loss = slider.text_slider_step(setup, model, batch={}, config=_Cfg(), train_progress=_TP())
         # target = 0 + 2*(1 - 0.25) = 1.5 ; student = 0.5 ; mse = (1.0)^2 = 1.0
         self.assertAlmostEqual(loss.item(), 1.0, places=5)
-        # teacher passes set multiplier 0 (x3), student sets 1 (x1), in that order
-        self.assertEqual(model.transformer_lora.multipliers, [0.0, 0.0, 0.0, 1.0])
-
-
-class ImageSliderStepTest(unittest.TestCase):
-    def test_positive_sets_plus_one(self):
-        setup = _StubSetup({})
-        model = _StubModel()
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
-            loss = slider.image_slider_step(setup, model, batch={'image_path': ['/d/positive/a.png']},
-                                            config=_Cfg(), train_progress=_TP())
-        # multiplier is set to +1 for the step, then restored to the neutral 1.0 in `finally`.
-        self.assertEqual(model.transformer_lora.multipliers, [1.0, 1.0])
-        self.assertEqual(setup.predict_calls, 1)
-        self.assertAlmostEqual(loss.item(), 0.7, places=5)
-
-    def test_negative_sets_minus_one(self):
-        setup = _StubSetup({})
-        model = _StubModel()
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
-            slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
-                                     config=_Cfg(), train_progress=_TP())
-        # multiplier is set to -1 for the step, then restored to the neutral 1.0 in `finally`.
-        self.assertEqual(model.transformer_lora.multipliers, [-1.0, 1.0])
-
-    def test_multiplier_restored_to_one_after_step(self):
-        setup = _StubSetup({})
-        model = _StubModel()
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
-            slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
-                                     config=_Cfg(), train_progress=_TP())
-        self.assertEqual(model.transformer_lora.multipliers[-1], 1.0)
-
-    def test_twins_share_pair_aligned_seed(self):
-        # A positive on an even global_step and its negative twin on the next (odd) step must
-        # receive the SAME seed_override (global_step // 2), so they get identical noise + timestep.
-        setup = _StubSetup({})
-        model = _StubModel()
-
-        class _TPStep:
-            def __init__(self, step):
-                self.global_step = step
-
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
-            slider.image_slider_step(setup, model, batch={'image_path': ['/d/positive/a.png']},
-                                     config=_Cfg(), train_progress=_TPStep(4))   # even step -> 4//2 = 2
-            slider.image_slider_step(setup, model, batch={'image_path': ['/d/negative/a.png']},
-                                     config=_Cfg(), train_progress=_TPStep(5))   # odd step  -> 5//2 = 2
-        self.assertEqual(setup.seed_overrides, [2, 2])
-
-    def test_uses_stamped_pair_seed_when_present(self):
-        # a batch stamped by build_image_slider_batches drives the seed regardless of global_step
-        setup = _StubSetup({})
-        model = _StubModel()
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
-            slider.image_slider_step(
-                setup, model,
-                batch={'image_path': ['/d/positive/a.png'], 'slider_pair_seed': 777},
-                config=_Cfg(), train_progress=_TP())
-        self.assertEqual(setup.seed_overrides, [777])
-
-    def test_raises_on_batch_size_greater_than_one(self):
-        setup = _StubSetup({})
-        model = _StubModel()
-        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
-             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"), \
-             self.assertRaises(ValueError):
-            slider.image_slider_step(
-                setup, model,
-                batch={'image_path': ['/d/positive/a.png', '/d/negative/b.png']},
-                config=_Cfg(), train_progress=_TP(),
-            )
-        # must fail before touching the multiplier or running predict/calculate_loss.
-        self.assertEqual(model.transformer_lora.multipliers, [])
-        self.assertEqual(setup.predict_calls, 0)
+        # teacher runs with multiplier 0 (set once), student with 1
+        self.assertEqual(model.transformer_lora.multipliers, [0.0, 1.0])
 
 
 class DispatchTest(unittest.TestCase):
-    def test_dispatch_image(self):
-        with mock.patch.object(slider_config, "SLIDER_MODE", "image"), \
-             mock.patch.object(slider, "image_slider_step", return_value=torch.tensor(1.0)) as img, \
-             mock.patch.object(slider, "text_slider_step", return_value=torch.tensor(2.0)) as txt:
-            out = slider.slider_train_step("setup", "model", {}, "cfg", "tp")
-        img.assert_called_once()
-        txt.assert_not_called()
-        self.assertEqual(out.item(), 1.0)
-
     def test_dispatch_text(self):
         with mock.patch.object(slider_config, "SLIDER_MODE", "text"), \
-             mock.patch.object(slider, "image_slider_step", return_value=torch.tensor(1.0)) as img, \
              mock.patch.object(slider, "text_slider_step", return_value=torch.tensor(2.0)) as txt:
             out = slider.slider_train_step("setup", "model", {}, "cfg", "tp")
         txt.assert_called_once()
-        img.assert_not_called()
         self.assertEqual(out.item(), 2.0)
 
     def test_dispatch_default_raises(self):

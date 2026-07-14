@@ -1,9 +1,13 @@
 """
-Krea2 concept slider training steps (image + text), driven by slider_config.
+Krea2 text concept slider training, driven by slider_config.
 
-Enabled via slider_config.SLIDER_MODE; dispatched from GenericTrainer. Krea2 LoRA only.
+Enabled via slider_config.SLIDER_MODE == "text"; dispatched from GenericTrainer. Krea2 LoRA only.
+
+A frozen teacher (LoRA multiplier 0) builds a guided target from positive/neutral/negative
+prompts at a shared noised latent, and the student (LoRA multiplier 1) is trained to match it:
+    target = neutral + guidance * (positive - negative)
+    loss   = MSE(student, target)
 """
-import os
 from dataclasses import dataclass
 
 from modules.module.quantized.LinearSVD import BaseLinearSVD
@@ -12,19 +16,6 @@ from modules.trainer import slider_config
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-
-
-def image_multiplier_for_path(image_path: str, positive_token: str, negative_token: str) -> float:
-    """+1.0 for a positive-folder image, -1.0 for a negative-folder image."""
-    has_pos = positive_token in image_path
-    has_neg = negative_token in image_path
-    if has_pos and has_neg:
-        raise ValueError(f"Image path {image_path!r} contains both tokens; folder layout is ambiguous.")
-    if has_pos:
-        return 1.0
-    if has_neg:
-        return -1.0
-    raise ValueError(f"Image path {image_path!r} contains neither {positive_token!r} nor {negative_token!r}.")
 
 
 def compose_text_target(neutral: Tensor, positive: Tensor, negative: Tensor, guidance: float) -> Tensor:
@@ -50,11 +41,11 @@ def check_slider_compatible(model) -> None:
     """Raise fast if `model` cannot correctly support slider training.
 
     Slider training relies on `model.transformer_lora`'s multiplier to scale the LoRA delta for
-    the positive/negative/teacher/student passes. That multiplier is only honored on the plain
+    the teacher (0) and student (1) passes. That multiplier is only honored on the plain
     `LoRAModule.delta_forward` path. If the transformer's linears are quantized, LoRA wraps
     `BaseLinearSVD` and `LoRAModule.forward` takes the `forward_with_lora(...)` path instead,
-    which ignores `self.multiplier` entirely -- silently breaking both the image and text
-    sliders (every sample would be trained as if multiplier=1, regardless of folder/token sign).
+    which ignores `self.multiplier` entirely -- silently breaking the slider (the teacher pass
+    would run with the LoRA active instead of frozen).
     """
     transformer_lora = getattr(model, "transformer_lora", None)
     if transformer_lora is None:
@@ -102,33 +93,6 @@ def get_prompt_cache(model, train_device) -> SliderPromptCache:
     return _PROMPT_CACHE
 
 
-def image_slider_step(model_setup, model, batch, config, train_progress):
-    if len(batch['image_path']) != 1:
-        raise ValueError(
-            f"image_slider_step got a batch of {len(batch['image_path'])} images, but the image "
-            f"slider applies a single +1/-1 sign to the whole batch based on batch['image_path'][0]. "
-            f"Set batch_size=1 for the image slider."
-        )
-    multiplier = image_multiplier_for_path(
-        batch['image_path'][0], slider_config.IMAGE_POSITIVE_TOKEN, slider_config.IMAGE_NEGATIVE_TOKEN
-    )
-    # Shared per-pair seed stamped by build_image_slider_batches, so a positive and its negative
-    # twin get identical noise + timestep and only the concept + the +1/-1 sign differ. Without
-    # this the twins are noised differently, the shared content never cancels, and the LoRA drifts
-    # (loss climbs). Falls back to the step-parity estimate if the batch wasn't stamped.
-    pair_seed = batch.get('slider_pair_seed', train_progress.global_step // 2)
-    if slider_config.SLIDER_DEBUG:
-        print(f"[slider] {os.path.basename(batch['image_path'][0])} sign={multiplier:+.0f} seed={pair_seed}")
-    model.transformer_lora.set_multiplier(multiplier)
-    try:
-        data = model_setup.predict(model, batch, config, train_progress, seed_override=pair_seed)
-        return model_setup.calculate_loss(model, batch, data, config)
-    finally:
-        # Restore the neutral multiplier so a following sample/preview doesn't inherit the +1/-1
-        # slider sign left over from this training step.
-        model.transformer_lora.set_multiplier(1.0)
-
-
 def text_slider_step(model_setup, model, batch, config, train_progress):
     cache = get_prompt_cache(model, model_setup.train_device)
     with model.autocast_context:
@@ -142,9 +106,7 @@ def text_slider_step(model_setup, model, batch, config, train_progress):
         with torch.no_grad():
             model.transformer_lora.set_multiplier(0.0)  # teacher: LoRA off
             pos = model_setup._transformer_forward(model, latent_input, cache.positive[0], cache.positive[1], timestep)
-            model.transformer_lora.set_multiplier(0.0)  # teacher: LoRA off
             neu = model_setup._transformer_forward(model, latent_input, cache.neutral[0], cache.neutral[1], timestep)
-            model.transformer_lora.set_multiplier(0.0)  # teacher: LoRA off
             neg = model_setup._transformer_forward(model, latent_input, cache.negative[0], cache.negative[1], timestep)
             target = compose_text_target(neu, pos, neg, slider_config.TEXT_GUIDANCE).detach()
 
@@ -158,71 +120,7 @@ def slider_enabled() -> bool:
     return slider_config.SLIDER_MODE is not None
 
 
-def image_slider_enabled() -> bool:
-    return slider_config.SLIDER_MODE == "image"
-
-
-def build_image_slider_batches(batches, positive_token=None, negative_token=None, base_seed=0):
-    """Materialize one epoch of batches and reorder them into positive->negative twin pairs.
-
-    The image slider is contrastive: each positive-folder image must be trained together with
-    its negative twin (the same file under the negative folder) so the shared image content
-    cancels and only the concept direction is learned. This materializes the whole epoch (fine
-    for the small datasets sliders use), matches each positive with its negative twin -- found by
-    substituting `positive_token` -> `negative_token` in the path and requiring an identical
-    latent shape -- and emits the two adjacently (positive then negative). Positives without
-    exactly one matching twin are dropped.
-
-    Returns `(paired_batches, dropped_paths)`. Runs at batch_size=1 (one image per batch); raises
-    otherwise. Set gradient accumulation = 2 so each optimizer step covers a whole pair, making
-    the content-gradient cancellation exact.
-    """
-    if positive_token is None:
-        positive_token = slider_config.IMAGE_POSITIVE_TOKEN
-    if negative_token is None:
-        negative_token = slider_config.IMAGE_NEGATIVE_TOKEN
-
-    orig_list = list(batches)
-    for batch in orig_list:
-        if len(batch['image_path']) != 1:
-            raise ValueError(
-                f"The image slider requires batch_size=1 (one image per batch), got "
-                f"{len(batch['image_path'])}."
-            )
-
-    paired = []
-    dropped = []
-    pair_index = 0
-    for batch in orig_list:
-        path = batch['image_path'][0]
-        if positive_token not in path:
-            # negatives are pulled in via their positive twin; skip standalone negatives here
-            continue
-        negative_path = path.replace(positive_token, negative_token)
-        twins = [
-            item for item in orig_list
-            if item['image_path'][0] == negative_path
-            and batch['latent_image'][0].shape == item['latent_image'][0].shape
-        ]
-        if len(twins) == 1:
-            twin = twins[0]
-            # Stamp both twins with one shared seed so they get identical noise + timestep in
-            # predict(), regardless of which step index each lands on. base_seed (the epoch's
-            # starting global_step) varies the noise/timestep across epochs.
-            pair_seed = base_seed + pair_index
-            batch['slider_pair_seed'] = pair_seed
-            twin['slider_pair_seed'] = pair_seed
-            paired.append(batch)
-            paired.append(twin)
-            pair_index += 1
-        else:
-            dropped.append(path)
-    return paired, dropped
-
-
 def slider_train_step(model_setup, model, batch, config, train_progress):
-    if slider_config.SLIDER_MODE == "image":
-        return image_slider_step(model_setup, model, batch, config, train_progress)
     if slider_config.SLIDER_MODE == "text":
         return text_slider_step(model_setup, model, batch, config, train_progress)
     raise ValueError(f"slider_train_step called with SLIDER_MODE={slider_config.SLIDER_MODE!r}")

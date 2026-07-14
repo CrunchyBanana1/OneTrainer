@@ -9,28 +9,22 @@ class SliderConfigValidationTest(unittest.TestCase):
         with mock.patch.object(slider_config, "SLIDER_MODE", None):
             slider_config.validate_slider_config()  # must not raise
 
-    def test_image_mode_requires_tokens(self):
-        with mock.patch.object(slider_config, "SLIDER_MODE", "image"), \
-             mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", ""):
-            with self.assertRaises(ValueError):
-                slider_config.validate_slider_config()
-
     def test_text_mode_requires_prompts(self):
         with mock.patch.object(slider_config, "SLIDER_MODE", "text"), \
-             mock.patch.object(slider_config, "TEXT_POSITIVE", ""):
-            with self.assertRaises(ValueError):
-                slider_config.validate_slider_config()
+             mock.patch.object(slider_config, "TEXT_POSITIVE", ""), \
+             self.assertRaises(ValueError):
+            slider_config.validate_slider_config()
 
     def test_text_mode_requires_finite_guidance(self):
         with mock.patch.object(slider_config, "SLIDER_MODE", "text"), \
-             mock.patch.object(slider_config, "TEXT_GUIDANCE", float("inf")):
-            with self.assertRaises(ValueError):
-                slider_config.validate_slider_config()
+             mock.patch.object(slider_config, "TEXT_GUIDANCE", float("inf")), \
+             self.assertRaises(ValueError):
+            slider_config.validate_slider_config()
 
     def test_unknown_mode_raises(self):
-        with mock.patch.object(slider_config, "SLIDER_MODE", "bogus"):
-            with self.assertRaises(ValueError):
-                slider_config.validate_slider_config()
+        with mock.patch.object(slider_config, "SLIDER_MODE", "bogus"), \
+             self.assertRaises(ValueError):
+            slider_config.validate_slider_config()
 
 
 if __name__ == "__main__":

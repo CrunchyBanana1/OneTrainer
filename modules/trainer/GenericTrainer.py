@@ -686,22 +686,11 @@ class GenericTrainer(BaseTrainer):
 
             current_epoch_length = self.data_loader.get_data_set().approximate_length()
 
-            data_iterable = self.data_loader.get_data_loader()
-            if slider.image_slider_enabled():
-                # contrastive pairing: reorder into positive->negative twin pairs and drop
-                # unpaired images so each concept pair trains back-to-back (set gradient
-                # accumulation = 2 to fold a whole pair into one optimizer step).
-                data_iterable, dropped_paths = slider.build_image_slider_batches(
-                    data_iterable, base_seed=train_progress.global_step)
-                current_epoch_length = len(data_iterable)
-                print(f"[image slider] {len(data_iterable) // 2} positive/negative pairs "
-                      f"({len(data_iterable)} steps); dropped {len(dropped_paths)} unpaired image(s)")
-
             if multi.is_master():
-                batches = step_tqdm = tqdm(data_iterable, desc="step", total=current_epoch_length,
+                batches = step_tqdm = tqdm(self.data_loader.get_data_loader(), desc="step", total=current_epoch_length,
                                  initial=train_progress.epoch_step)
             else:
-                batches = data_iterable
+                batches = self.data_loader.get_data_loader()
             for batch in batches:
                 multi.sync_commands(self.commands)
                 if self.commands.get_stop_command():

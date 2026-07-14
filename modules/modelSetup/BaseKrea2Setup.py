@@ -74,17 +74,9 @@ class BaseKrea2Setup(
             train_progress: TrainProgress,
             *,
             deterministic: bool = False,
-            seed_override: int | None = None,
     ) -> dict:
         with model.autocast_context:
-            if deterministic:
-                batch_seed = 0
-            elif seed_override is not None:
-                # image slider: a positive and its negative twin pass the same seed so they get
-                # identical noise + timestep, leaving only the concept (and the LoRA sign flip) to differ.
-                batch_seed = seed_override
-            else:
-                batch_seed = train_progress.global_step * multi.world_size() + multi.rank()
+            batch_seed = 0 if deterministic else train_progress.global_step * multi.world_size() + multi.rank()
             generator = torch.Generator(device=config.train_device)
             generator.manual_seed(batch_seed)
             rand = Random(batch_seed)

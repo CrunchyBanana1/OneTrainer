@@ -1,24 +1,8 @@
 import unittest
 
-from modules.trainer.slider import compose_text_target, image_multiplier_for_path
+from modules.trainer.slider import compose_text_target
 
 import torch
-
-
-class ImageMultiplierTest(unittest.TestCase):
-    def test_positive_path_is_plus_one(self):
-        self.assertEqual(image_multiplier_for_path("/data/positive/foo.png", "positive", "negative"), 1.0)
-
-    def test_negative_path_is_minus_one(self):
-        self.assertEqual(image_multiplier_for_path("/data/negative/foo.png", "positive", "negative"), -1.0)
-
-    def test_neither_token_raises(self):
-        with self.assertRaises(ValueError):
-            image_multiplier_for_path("/data/other/foo.png", "positive", "negative")
-
-    def test_both_tokens_raises(self):
-        with self.assertRaises(ValueError):
-            image_multiplier_for_path("/data/positive/negative_foo.png", "positive", "negative")
 
 
 class ComposeTextTargetTest(unittest.TestCase):
