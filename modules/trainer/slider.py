@@ -3,6 +3,7 @@ Krea2 concept slider training steps (image + text), driven by slider_config.
 
 Enabled via slider_config.SLIDER_MODE; dispatched from GenericTrainer. Krea2 LoRA only.
 """
+import os
 from dataclasses import dataclass
 
 from modules.module.quantized.LinearSVD import BaseLinearSVD
@@ -111,14 +112,15 @@ def image_slider_step(model_setup, model, batch, config, train_progress):
     multiplier = image_multiplier_for_path(
         batch['image_path'][0], slider_config.IMAGE_POSITIVE_TOKEN, slider_config.IMAGE_NEGATIVE_TOKEN
     )
+    # Shared per-pair seed stamped by build_image_slider_batches, so a positive and its negative
+    # twin get identical noise + timestep and only the concept + the +1/-1 sign differ. Without
+    # this the twins are noised differently, the shared content never cancels, and the LoRA drifts
+    # (loss climbs). Falls back to the step-parity estimate if the batch wasn't stamped.
+    pair_seed = batch.get('slider_pair_seed', train_progress.global_step // 2)
+    if slider_config.SLIDER_DEBUG:
+        print(f"[slider] {os.path.basename(batch['image_path'][0])} sign={multiplier:+.0f} seed={pair_seed}")
     model.transformer_lora.set_multiplier(multiplier)
     try:
-        # Pair-aligned seed: build_image_slider_batches emits twins adjacently, so with batch_size=1
-        # a positive lands on an even global_step and its negative twin on the next (odd) step.
-        # global_step // 2 gives both the SAME seed -> identical noise + timestep, so only the concept
-        # and the +1/-1 sign differ. Without this the twins are noised differently and the shared
-        # content never cancels, so the LoRA drifts and the loss climbs. (Matches dxqb's Flux slider.)
-        pair_seed = train_progress.global_step // 2
         data = model_setup.predict(model, batch, config, train_progress, seed_override=pair_seed)
         return model_setup.calculate_loss(model, batch, data, config)
     finally:
@@ -160,7 +162,7 @@ def image_slider_enabled() -> bool:
     return slider_config.SLIDER_MODE == "image"
 
 
-def build_image_slider_batches(batches, positive_token=None, negative_token=None):
+def build_image_slider_batches(batches, positive_token=None, negative_token=None, base_seed=0):
     """Materialize one epoch of batches and reorder them into positive->negative twin pairs.
 
     The image slider is contrastive: each positive-folder image must be trained together with
@@ -190,6 +192,7 @@ def build_image_slider_batches(batches, positive_token=None, negative_token=None
 
     paired = []
     dropped = []
+    pair_index = 0
     for batch in orig_list:
         path = batch['image_path'][0]
         if positive_token not in path:
@@ -202,8 +205,16 @@ def build_image_slider_batches(batches, positive_token=None, negative_token=None
             and batch['latent_image'][0].shape == item['latent_image'][0].shape
         ]
         if len(twins) == 1:
+            twin = twins[0]
+            # Stamp both twins with one shared seed so they get identical noise + timestep in
+            # predict(), regardless of which step index each lands on. base_seed (the epoch's
+            # starting global_step) varies the noise/timestep across epochs.
+            pair_seed = base_seed + pair_index
+            batch['slider_pair_seed'] = pair_seed
+            twin['slider_pair_seed'] = pair_seed
             paired.append(batch)
-            paired.append(twins[0])
+            paired.append(twin)
+            pair_index += 1
         else:
             dropped.append(path)
     return paired, dropped

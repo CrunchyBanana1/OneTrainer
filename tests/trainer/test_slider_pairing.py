@@ -56,6 +56,21 @@ class BuildImageSliderBatchesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             slider.build_image_slider_batches([multi], "positive", "negative")
 
+    def test_twins_get_same_stamped_seed_varying_per_pair(self):
+        batches = [
+            _batch("/d/positive/a.png"), _batch("/d/positive/b.png"),
+            _batch("/d/negative/a.png"), _batch("/d/negative/b.png"),
+        ]
+        paired, _ = slider.build_image_slider_batches(batches, "positive", "negative", base_seed=100)
+        # [posA, negA, posB, negB] -> pair A seed 100 (both), pair B seed 101 (both)
+        seeds = [b['slider_pair_seed'] for b in paired]
+        self.assertEqual(seeds, [100, 100, 101, 101])
+
+    def test_base_seed_shifts_all_pair_seeds(self):
+        batches = [_batch("/d/positive/a.png"), _batch("/d/negative/a.png")]
+        paired, _ = slider.build_image_slider_batches(batches, "positive", "negative", base_seed=500)
+        self.assertEqual([b['slider_pair_seed'] for b in paired], [500, 500])
+
     def test_defaults_to_config_tokens(self):
         # tokens omitted -> falls back to slider_config defaults ("positive"/"negative")
         pos = _batch("/data/positive/a.png")

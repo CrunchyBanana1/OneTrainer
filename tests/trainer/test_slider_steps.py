@@ -130,6 +130,18 @@ class ImageSliderStepTest(unittest.TestCase):
                                      config=_Cfg(), train_progress=_TPStep(5))   # odd step  -> 5//2 = 2
         self.assertEqual(setup.seed_overrides, [2, 2])
 
+    def test_uses_stamped_pair_seed_when_present(self):
+        # a batch stamped by build_image_slider_batches drives the seed regardless of global_step
+        setup = _StubSetup({})
+        model = _StubModel()
+        with mock.patch.object(slider_config, "IMAGE_POSITIVE_TOKEN", "positive"), \
+             mock.patch.object(slider_config, "IMAGE_NEGATIVE_TOKEN", "negative"):
+            slider.image_slider_step(
+                setup, model,
+                batch={'image_path': ['/d/positive/a.png'], 'slider_pair_seed': 777},
+                config=_Cfg(), train_progress=_TP())
+        self.assertEqual(setup.seed_overrides, [777])
+
     def test_raises_on_batch_size_greater_than_one(self):
         setup = _StubSetup({})
         model = _StubModel()

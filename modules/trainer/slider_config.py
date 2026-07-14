@@ -9,7 +9,9 @@ This is intentionally NOT wired into the UI — it is a local training tool.
 import math
 
 # None | "image" | "text"
-SLIDER_MODE: str | None = None
+SLIDER_MODE: str = None # | None = None
+
+#SLIDER_MODE = "image"
 
 # ---- image slider ----------------------------------------------------------
 # Dataset layout: one concept with parallel subfolders whose paths contain
@@ -26,6 +28,11 @@ TEXT_NEUTRAL: str = "a person"
 TEXT_NEGATIVE: str = "a person with a neutral expression"
 TEXT_TARGET: str = "a person"
 TEXT_GUIDANCE: float = 2.0
+
+# When True, the image slider prints one line per step (filename, +1/-1 sign, shared pair seed)
+# so you can verify each positive and its negative twin pair up with the same seed and opposite
+# sign. Leave False for normal runs.
+SLIDER_DEBUG: bool = False
 
 
 def validate_slider_config() -> None:

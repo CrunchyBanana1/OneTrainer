@@ -691,7 +691,8 @@ class GenericTrainer(BaseTrainer):
                 # contrastive pairing: reorder into positive->negative twin pairs and drop
                 # unpaired images so each concept pair trains back-to-back (set gradient
                 # accumulation = 2 to fold a whole pair into one optimizer step).
-                data_iterable, dropped_paths = slider.build_image_slider_batches(data_iterable)
+                data_iterable, dropped_paths = slider.build_image_slider_batches(
+                    data_iterable, base_seed=train_progress.global_step)
                 current_epoch_length = len(data_iterable)
                 print(f"[image slider] {len(data_iterable) // 2} positive/negative pairs "
                       f"({len(data_iterable)} steps); dropped {len(dropped_paths)} unpaired image(s)")
