@@ -148,12 +148,18 @@ class BaseKrea2Setup(
             text_seq_len, grid_height, grid_width, self.train_device
         )
 
-        if text_attention_mask is not None and torch.all(text_attention_mask):
-            text_attention_mask = None
+        if text_attention_mask is not None:
+            # cached slider prompt embeds may be encoded while the text encoder is offloaded to CPU;
+            # move the mask to the train device to match the transformer (a no-op for predict, whose
+            # inputs are already on-device).
+            text_attention_mask = text_attention_mask.to(self.train_device)
+            if torch.all(text_attention_mask):
+                text_attention_mask = None
 
+        train_dtype = model.train_dtype.torch_dtype()
         packed_predicted_flow = model.transformer(
-            hidden_states=packed_latent_input.to(dtype=model.train_dtype.torch_dtype()),
-            encoder_hidden_states=text_encoder_output.to(dtype=model.train_dtype.torch_dtype()),
+            hidden_states=packed_latent_input.to(device=self.train_device, dtype=train_dtype),
+            encoder_hidden_states=text_encoder_output.to(device=self.train_device, dtype=train_dtype),
             timestep=timestep / 1000,
             position_ids=position_ids,
             encoder_attention_mask=text_attention_mask,
